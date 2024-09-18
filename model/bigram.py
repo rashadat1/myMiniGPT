@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch.nn import functional as F
 
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
+device='cpu'
 
 with open('/Users/tarikrashada/Projects/myMiniGPT/data/input.txt','r') as file:
     text = file.read()
@@ -17,6 +18,7 @@ max_iters = 3000
 eval_interval = 300
 eval_iters = 200
 vocab_size = len(chars)
+embed_size = 32
 
 # create character-to-integer and integer-to-character mappings for tokenization
 char_to_int_map = {char : i for i,char in enumerate(chars)}
@@ -78,20 +80,12 @@ def estimate_loss():
             
 
 class BigramLanguageModel(nn.Module):
-    def __init__(self,vocab_size):
-        """Initialize the language model with the size of the vocabulary"""
+    def __init__(self):
+        """Initialize the language model with token and positional embeddings as well as a linear layer"""
         super().__init__()
-        self.vocab_size = vocab_size
-    
-    def embedding_lookup(self,input):
-        """
-        Perform embedding lookup to map tokens to embedding vectors
-        Args:
-            input (Tensor): Input tensor of token indices. Has shape (batch_size, context_length)
-        Returns:
-            Tensor: Embedding vectors for the input tokens (batch_size, context_length, vocab_size)
-        """
-        return nn.Embedding(vocab_size,vocab_size)(input)
+        self.token_embedding = nn.Embedding(vocab_size, embed_size) # embedding layer for token embeddings
+        self.pos_embedding = nn.Embedding(context_length,embed_size) # positional embedding
+        self.fc = nn.Linear(embed_size,vocab_size) # linear layer to map to vocab size
     
     def forward(self,input,targets=None):
         """
@@ -104,9 +98,16 @@ class BigramLanguageModel(nn.Module):
         Returns:
             Tuple[Tensor or None, Tensor]: The loss (if targets are provided) and the model output.
         """
-        # context aware repr. of input token in terms of other tokens. Each token becomes a vector of length vocab_size
-        output = self.embedding_lookup(input) # <- shape is (batch_size,context_length,vocab_size)
-        if not targets:
+        # T is the context length
+        B,T = input.shape
+        tok_emb = self.token_embedding(input) # <- shape is (batch_size,context_length,embed_size) where embed_size is the length of the embedding vectors
+        pos_emb = self.pos_embedding(torch.arange(T, device=device) % context_length) # integers from 0 to context_length-1, each is embedded to get context_length x embed_dim tensor
+        # positional embeddings get broadcasted across batches
+        x = tok_emb + pos_emb # (batch_size,context_length,embed_size) dimensional tensors 
+        
+        output = self.fc(x) # <- (batch_size,context_length,vocab_size)
+        
+        if targets == None:
             loss = None
             
         else:
@@ -126,7 +127,7 @@ class BigramLanguageModel(nn.Module):
             # extract the embedding of the last token
             last_hidden_state = output[:,-1,:]
             # convert this embedding vector into a probability distribution over the vocabulary
-            distribution = F.softmax(last_hidden_state)
+            distribution = F.softmax(last_hidden_state, dim=-1)
             # sample from distribution to get new token index 
             newToken = torch.multinomial(distribution,num_samples=1)
             input = torch.cat([input,newToken],dim=1)
@@ -134,11 +135,11 @@ class BigramLanguageModel(nn.Module):
         return input
     
 
-model = BigramLanguageModel(vocab_size)
+model = BigramLanguageModel()
 m = model.to(device)
 
 # create a Pytorch optimizer
-optimizer = torch.optim.AdamW(model.parameters(),lr=learning_rate)
+optimizer = torch.optim.AdamW(m.parameters(),lr=learning_rate)
 
 for iter in range(max_iters):
     if iter % eval_interval == 0:
