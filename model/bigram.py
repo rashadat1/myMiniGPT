@@ -1,5 +1,6 @@
 import torch
 import torch.nn as nn
+import math
 from torch.nn import functional as F
 
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
@@ -13,7 +14,7 @@ chars = sorted(list(set(text)))
 # model hyperparameters
 batch_size = 32
 context_length = 16 # length of input sequences
-learning_rate = 1e-2
+learning_rate = 1e-3
 max_iters = 3000
 eval_interval = 300
 eval_iters = 200
@@ -77,16 +78,52 @@ def estimate_loss():
     # puts model back on training mode
     model.train()
     return out
-            
+
+class AttentionHead(nn.Module):
+    def __init__(self,head_size):
+        """Initialize the attention head with key, query, value vectors and create causal masking"""
+        super().__init__()
+        self.head_size = head_size
+        self.key = nn.Linear(embed_size,head_size, bias=False)
+        self.query = nn.Linear(embed_size,head_size, bias=False)
+        self.value = nn.Linear(embed_size,head_size, bias=False)
+        
+        self.register_buffer('tril', torch.tril(torch.ones(context_length, context_length)))
+        
+    def forward(self, input):
+        B,T,C = input.shape
+        k = self.key(input)
+        q = self.query(input)
+        v = self.value(input)
+        
+        attnScores = k @ q.transpose(-2,-1) # Shape (batch_size, context_length, head_size) x (batch_size, head_size, context_length)
+        attnScores = attnScores / math.sqrt(self.head_size)
+        # add causal masking so future doesn't influence the past to make this a decoder block
+        attnScores = attnScores.masked_fill_(self.tril[:context_length, :context_length] == 0, float('-inf'))
+        # (batch_size, context_length, context_length)
+        attnWeight = F.softmax(attnWeight, dim=-1)
+        attnOutput = attnWeight @ v # shape (batch_size, context_length, head_size)
+        return attnOutput
+
+class MultiHeadedAttention(nn.Module):
+    def __init__(self,num_heads,head_size):
+        super().__init__()
+        self.heads = nn.ModuleList([AttentionHead(head_size) for _ in range(num_heads)])
+        
+    def forward(self,input):
+        return torch.cat([h(input) for h in self.heads],dim=-1)
+
 
 class BigramLanguageModel(nn.Module):
-    def __init__(self):
+    def __init__(self,num_heads):
         """Initialize the language model with token and positional embeddings as well as a linear layer"""
         super().__init__()
         self.token_embedding = nn.Embedding(vocab_size, embed_size) # embedding layer for token embeddings
         self.pos_embedding = nn.Embedding(context_length,embed_size) # positional embedding
         self.fc = nn.Linear(embed_size,vocab_size) # linear layer to map to vocab size
-    
+        
+        self.attnheads = MultiHeadedAttention(num_heads,embed_size/num_heads) # self-attention head
+        
     def forward(self,input,targets=None):
         """
         Forward pass for the language model.
@@ -104,7 +141,7 @@ class BigramLanguageModel(nn.Module):
         pos_emb = self.pos_embedding(torch.arange(T, device=device) % context_length) # integers from 0 to context_length-1, each is embedded to get context_length x embed_dim tensor
         # positional embeddings get broadcasted across batches
         x = tok_emb + pos_emb # (batch_size,context_length,embed_size) dimensional tensors 
-        
+        x = self.attnheads(x)
         output = self.fc(x) # <- (batch_size,context_length,vocab_size)
         
         if targets == None:
@@ -122,8 +159,10 @@ class BigramLanguageModel(nn.Module):
     def generate(self,input,max_new_tokens):
         i = 0
         while i < max_new_tokens:
+            # crop input to last context_length of tokens
+            inp_cond = input[:,-context_length]
             # call forward method
-            _, output = self(input)
+            _, output = self(inp_cond)
             # extract the embedding of the last token
             last_hidden_state = output[:,-1,:]
             # convert this embedding vector into a probability distribution over the vocabulary
