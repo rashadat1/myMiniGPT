@@ -6,7 +6,7 @@ I encountered a number of challenges when working on this project including incr
 \
 One bottleneck I encountered was when I tried to stream my dataset instead of loading the whole thing into memory - I think this greatly increased the training time as it required that we load an example each time we needed to retrieve a batch. 
 Currently I am at a stage where I have achieved limited success with pre-training. The next step is to try sharding my dataset - loading it in and tokenizing it before starting training. Once that is done - I anticipate a fast, efficient training loop.\
-\
+
 ### Next Steps
 Once I have completed my pre-training, my next goal is to fine-tune the model to a dataset containing the full published works of the philosopher Nietzsche. The goal is to create a next character prediction model based on Nietzsche's works.\
 \
