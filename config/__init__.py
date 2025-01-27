@@ -1,0 +1,1 @@
+from .GPTconfig import config

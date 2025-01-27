@@ -4,21 +4,7 @@ import torch.nn as nn
 import math
 from torch.nn import functional as F
 import numpy as np
-
-batch_size = 8
-context_length = 1024 # length of input sequences
-total_batch_size = 524288 # 2**19 close to .5M in number of tokens
-accumulation_steps = total_batch_size // (batch_size * context_length)
-learning_rate = 1e-6
-max_iters = 10000
-eval_interval = 500
-eval_iters = 200
-vocab_size = 50257 # 50257 with BPE but it turns out using 50304 - the nearest power of 64 is more efficient
-embed_size = 768
-# use dropout for regularization to fight overfitting
-dropout = 0.1
-num_layers = 12
-num_heads = 12
+from config.GPTconfig import config
 
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
 
@@ -32,24 +18,27 @@ class AttentionHead(nn.Module):
         self.key = nn.Linear(self.embed_size,self.head_size, bias=False)
         self.query = nn.Linear(self.embed_size,self.head_size, bias=False)
         self.value = nn.Linear(self.embed_size,self.head_size, bias=False)
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(config['dropout'])
         self.register_buffer('tril', torch.tril(torch.ones(self.context_length, self.context_length)))
-
+        self.c_proj = nn.Linear(self.embed_size,self.embed_size)
     def forward(self, input):
         B,T,C = input.shape
         k = self.key(input)
         q = self.query(input)
         v = self.value(input)
 
-        attnScores = k @ q.transpose(-2,-1) # Shape (batch_size, context_length, head_size) x (batch_size, head_size, context_length)
-        attnScores = attnScores / math.sqrt(self.head_size)
+        #attnScores = k @ q.transpose(-2,-1) # Shape (batch_size, context_length, head_size) x (batch_size, head_size, context_length)
+        #attnScores = attnScores / math.sqrt(self.head_size)
         # add causal masking so future doesn't influence the past to make this a decoder block
-        attnScores = attnScores.masked_fill_(self.tril[:T, :T] == 0, float('-inf'))
+        #attnScores = attnScores.masked_fill_(self.tril[:T, :T] == 0, float('-inf'))
         # (batch_size, context_length, context_length)
-        attnWeight = F.softmax(attnScores, dim=-1)
-        attnWeight = self.dropout(attnWeight)
-        attnOutput = attnWeight @ v # shape (batch_size, context_length, head_size)
-        return attnOutput
+        #attnWeight = F.softmax(attnScoxres, dim=-1)
+        #attnWeight = self.dropout(attnWeight)
+        #attnOutput = attnWeight @ v # shape (batch_size, context_length, head_size)
+        # Flash attention - more efficient version of all of the above code implementation
+        attnOutput = F.scaled_dot_product_attention(q,k,v,is_causal=True)
+        y = self.c_proj(self.dropout(attnOutput))
+        return y
     
     
 class MultiHeadedAttention(nn.Module):
@@ -63,7 +52,7 @@ class MultiHeadedAttention(nn.Module):
         # Linear projection of the output of the self attention layer
         self.proj = nn.Linear(self.embed_size,self.embed_size)
         self.proj.GPT_SCAL_INIT = 1
-        self.dropout = nn.Dropout(dropout)
+        self.dropout = nn.Dropout(config['dropout'])
 
     def forward(self,input):
         out = torch.cat([h(input) for h in self.heads],dim=-1)
@@ -80,7 +69,7 @@ class FeedForward(nn.Module):
             nn.Linear(self.embed_size,self.embed_size),
             nn.GELU(),
             nn.Linear(self.embed_size,self.embed_size),
-            nn.Dropout(dropout),
+            nn.Dropout(config['dropout']),
         )
 
     def forward(self,x):
@@ -93,7 +82,7 @@ class TransformerBlock(nn.Module):
         self.num_heads = num_heads
         head_size = self.embed_size // self.num_heads
         self.ffwd = FeedForward(self.embed_size)
-        self.attnMulti = MultiHeadedAttention(self.embed_size,self.num_heads,head_size,context_length)
+        self.attnMulti = MultiHeadedAttention(self.embed_size,self.num_heads,head_size,config['context_length'])
         self.LN1 = nn.LayerNorm(self.embed_size)
         self.LN2 = nn.LayerNorm(self.embed_size)
     # residual connection implemented in the transformer block
@@ -166,7 +155,8 @@ class GPT(nn.Module):
             {"params": [param_dict[pn] for pn in sorted(list(no_decay))], "weight_decay": 0.0},
 
         ]
-        optimizer = torch.optim.AdamW(optim_groups,lr=1e-5,betas=(0.9,0.95),eps=1e-8)
+        # fused = True uses fused AdamW which is faster when running on CUDA
+        optimizer = torch.optim.AdamW(optim_groups,lr=1e-5,betas=(0.9,0.95),eps=1e-8,fused=True)
         return optimizer
 
     def forward(self,input,targets=None):

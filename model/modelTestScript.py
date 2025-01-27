@@ -1,6 +1,5 @@
 import sys,os
 import torch
-import tiktoken
 import torch.nn as nn
 import math
 from torch.nn import functional as F
@@ -11,31 +10,14 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.utility import bpeDecode, bpeEncode
 from GPT import GPT
-
-# model hyperparameters
-# 524288 tokens per batch (that is per step in max_iters) so with max_iters = 7k
-# then this model will see in total over 3B tokens
-batch_size = 8
-context_length = 1024 # length of input sequences
-total_batch_size = 524288 # 2**19 close to .5M in number of tokens
-accumulation_steps = total_batch_size // (batch_size * context_length)
-learning_rate = 1e-6
-max_iters = 10000
-eval_interval = 500
-eval_iters = 200
-vocab_size = 50257 # 50257 with BPE but it turns out using 50304 - the nearest power of 64 is more efficient
-embed_size = 768
-# use dropout for regularization to fight overfitting
-dropout = 0.1
-num_layers = 12
-num_heads = 12
+from config.GPTconfig import config
 
 # generate
 device = 'mps' if torch.backends.mps.is_available() else 'cpu'
 num_processes = 1
 process_rank = 1
 
-model2 = GPT(vocab_size=vocab_size,embed_size=embed_size,context_length=context_length,num_heads=num_heads,num_layers=num_layers)
+model2 = GPT(vocab_size=config['vocab_size'],embed_size=config['embed_size'],context_length=config['context_length'],num_heads=config['num_heads'],num_layers=config['num_layers'])
 
 torch.no_grad()
 

@@ -1,6 +1,5 @@
 import os,sys
 import torch
-import tiktoken
 import torch.nn as nn
 import math
 from torch.nn import functional as F
@@ -11,36 +10,23 @@ sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 from utils.utility import bpeDecode,bpeEncode
 from GPT import GPT
+from config.GPTconfig import config
 
 np.int = np.int32
 np.float = np.float64
 np.bool = np.bool_
 # Set the environment variable for PyTorch CUDA memory allocation configuration
-
-# model hyperparameters
-# 524288 tokens per batch (that is per step in max_iters) so with max_iters = 7k
-# then this model will see in total over 3B tokens
-batch_size = 8
-context_length = 1024 # length of input sequences
-total_batch_size = 524288 # 2**19 close to .5M in number of tokens
-accumulation_steps = total_batch_size // (batch_size * context_length)
-learning_rate = 1e-6
-max_iters = 10000
-eval_interval = 500
-eval_iters = 200
-vocab_size = 50257 # 50257 with BPE but it turns out using 50304 - the nearest power of 64 is more efficient
-embed_size = 768
-# use dropout for regularization to fight overfitting
-dropout = 0.1
-num_layers = 12
-num_heads = 12
-
+# number of accumulation steps to be used in gradient accumulation idea
+accumulation_steps = config['total_batch_size'] // (config['batch_size'] * config['context_length'])
 
 print('loading training and validation datasets in streaming mode')
 
-train_data = load_dataset('allenai/c4','en',split='train',streaming=True,trust_remote_code=True)
-val_data = load_dataset('allenai/c4','en',split='validation',streaming=True,trust_remote_code=True)
+# train_data = load_dataset('allenai/c4','en',split='train',streaming=True,trust_remote_code=True)
+# val_data = load_dataset('allenai/c4','en',split='validation',streaming=True,trust_remote_code=True)
 
+dataset = load_dataset('openwebtext',trust_remote_code=True)
+train_data = dataset['train']
+val_data = dataset['validation']
 
 torch.no_grad()
 def estimate_loss():
@@ -51,9 +37,9 @@ def estimate_loss():
     model.eval()
     for split,data in zip(['train','val'],[train_data,val_data]):
         # for each split, initialize tensor to store loss values across eval_iters iterations
-        losses = torch.zeros(eval_iters)
-        for k, (X,Y) in enumerate(generate_streaming_batch(split,batch_size,context_length,rank,world_size)):
-            if k >= eval_iters:
+        losses = torch.zeros(config['eval_iters'])
+        for k, (X,Y) in enumerate(generate_streaming_batch(split,config['batch_size'],config['context_length'],rank,world_size)):
+            if k >= config['eval_iters']:
                 break
             # for each split generate eval_iters batches and calculate loss on each
             X,Y = X.to(device), Y.to(device)
@@ -107,21 +93,17 @@ def generate_streaming_batch(split,batch_size,context_length,process_rank,num_pr
     Returns:
         Tuple[Tensor, Tensor]: A batch of input (x) and target (y) sequences
     """
-    batch = []
     if split == 'train':
-        dataset = train_data
-    else:
-        dataset = val_data
-        
+        dataset = train_data.shard(num_shards=num_processes, index = process_rank)
+    
+    batch = []
     current_batch_count = 0
     
     for example in dataset:
-        #if current_batch_count % num_processes == process_rank: 
-            # each process picks its data portion
+        # each process picks its data portion
         text = example['text']
         tokens = bpeEncode(text)
         batch.extend(tokens)
-        
         if len(batch) >= batch_size * context_length + 1:
             x = torch.tensor(batch[:batch_size * context_length], dtype=torch.long).view(batch_size, context_length)
             y = torch.tensor(batch[1:batch_size * context_length + 1], dtype=torch.long).view(batch_size, context_length)
@@ -132,7 +114,7 @@ def generate_streaming_batch(split,batch_size,context_length,process_rank,num_pr
         current_batch_count += 1
 
 
-model = GPT(vocab_size=vocab_size,embed_size=embed_size,context_length=context_length,num_heads=num_heads,num_layers=num_layers)
+model = GPT(vocab_size=config['vocab_size'],embed_size=config['embed_size'],context_length=config['context_length'],num_heads=config['num_heads'],num_layers=config['num_layers'])
 # removes python interpreter and runs a pytorch compiler to optimize tensor operations
 
 
@@ -151,7 +133,7 @@ optimizer = raw_model.configure_optimizer_weight_decay(weight_decay=0.1,device=d
 
 accumulation_steps = accumulation_steps // world_size
 if master_process:
-    print(f"Total desired batch_size: {total_batch_size}")
+    print(f"Total desired batch_size: {config['total_batch_size']}")
     print(f"=> calculated gradient accumulation steps: {accumulation_steps}")
 
 print("I am GPU ", rank)
@@ -160,7 +142,7 @@ import math
 max_lr = 6e-4
 min_lr = max_lr * 0.01
 warmup_steps = 715 # warmup schedule that gpt3 used 
-max_steps = max_iters
+max_steps = config['max_iters']
 
 def learning_rate_schedule(it):
     if it < warmup_steps:
@@ -175,18 +157,18 @@ def learning_rate_schedule(it):
 
 import time
 training_dict = {'step':[],'loss':[],'lr':[],'dt':[],'tokens_processed':[]}
-for step in range(max_iters):
+for step in range(config['max_iters']):
     t0 = time.time()
     optimizer.zero_grad()
     loss_accum = 0.0
     num_tokens_processed = 0
     for micro_step in range(accumulation_steps):
-        xb, yb = next(generate_streaming_batch('train',batch_size,context_length,process_rank=rank,num_processes=world_size))
+        xb, yb = next(generate_streaming_batch('train',config['batch_size'],config['context_length'],process_rank=rank,num_processes=world_size))
         xb, yb = xb.to(device), yb.to(device)
         B,T = xb.size()
 
         num_tokens_processed += B * T
-        with torch.autocast(device_type='mps',dtype=torch.bfloat16):
+        with torch.autocast(device_type='cuda',dtype=torch.bfloat16):
             loss,output = model(xb,yb)
         loss = loss / accumulation_steps
         loss_accum += loss.detach()
@@ -211,8 +193,11 @@ for step in range(max_iters):
     if master_process:
         print(f"step {step:4d} | loss: {loss_accum.item():.6f} | lr {lr:.4e} | norm: {norm:.4f} | dt: {dt}s | num_tokens_processed: {num_tokens_processed:1f}")
 
-if ddp:
-    dist.destroy_process_group()
-
 torch.save(model.state_dict(),'smaller_gpt_model_weights2.pth')
 print('Model weights saved successfully')
+
+if ddp:
+    
+    dist.destroy_process_group()
+    
+import sys; sys.exit(0)
