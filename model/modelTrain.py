@@ -8,9 +8,10 @@ import numpy as np
 
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from utils.utility import bpeDecode,bpeEncode
+from utils.utility import bpeDecode,bpeEncode,load_tokens
 from GPT import GPT
 from config.GPTconfig import config
+from config.datasetconfig import config as dataset_config
 
 np.int = np.int32
 np.float = np.float64
@@ -24,11 +25,37 @@ print('loading training and validation datasets in streaming mode')
 # train_data = load_dataset('allenai/c4','en',split='train',streaming=True,trust_remote_code=True)
 # val_data = load_dataset('allenai/c4','en',split='validation',streaming=True,trust_remote_code=True)
 
-dataset = load_dataset('openwebtext',trust_remote_code=True)
-train_data = dataset['train']
-val_data = dataset['validation']
+
 
 torch.no_grad()
+class DataLoader:
+    def __init__(self, batch_size, context_length, num_processes, process_rank, split):
+        # get the list of all shards in the shard directory
+        shard_path = os.path.join(dataset_config.data_dir,dataset_config.shard_dir)
+        shards = os.listdir(shard_path)
+        shards = [s for s in shards if split in s]
+        shards = sorted(shards)
+        
+        shards = [os.path.join(shard_path, s) for s in shards]
+        
+        self.shards = shards 
+        self.batch_size = batch_size
+        self.context_length = context_length
+        self.num_processes = num_processes
+        self.process_rank = rank
+        self.split = split
+        if master_process:
+            print(f"Found {len(shards)} shards for split {split}")
+        
+        # initialize at shard 0
+        self.curr_shard = 0
+        self.tokens = load_tokens(self.shards[self.curr_shard])
+        self.current_position = self.batch_size * self.context_length * self.process_rank
+    
+    def next_batch(self):
+        
+
+
 def estimate_loss():
     # sum up individual token-level losses for all predictions in the batch
     # store this as total batch loss and then average over multiple batches

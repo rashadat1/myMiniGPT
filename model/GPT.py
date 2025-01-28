@@ -15,11 +15,11 @@ class AttentionHead(nn.Module):
         self.embed_size = embed_size
         self.head_size = head_size
         self.context_length = context_length
-        self.key = nn.Linear(self.embed_size,self.head_size, bias=False)
+        self.key = nn.Linear(in_features=self.embed_size,out_features=self.head_size, bias=False)
         self.query = nn.Linear(self.embed_size,self.head_size, bias=False)
         self.value = nn.Linear(self.embed_size,self.head_size, bias=False)
         self.dropout = nn.Dropout(config['dropout'])
-        self.register_buffer('tril', torch.tril(torch.ones(self.context_length, self.context_length)))
+        self.register_buffer('tril', torch.tril(torch.ones(self.context_length, self.context_length))) # ensures attention does not look into the future
         self.c_proj = nn.Linear(self.embed_size,self.embed_size)
     def forward(self, input):
         B,T,C = input.shape
@@ -32,7 +32,7 @@ class AttentionHead(nn.Module):
         # add causal masking so future doesn't influence the past to make this a decoder block
         #attnScores = attnScores.masked_fill_(self.tril[:T, :T] == 0, float('-inf'))
         # (batch_size, context_length, context_length)
-        #attnWeight = F.softmax(attnScoxres, dim=-1)
+        #attnWeight = F.softmax(attnScores, dim=-1)
         #attnWeight = self.dropout(attnWeight)
         #attnOutput = attnWeight @ v # shape (batch_size, context_length, head_size)
         # Flash attention - more efficient version of all of the above code implementation
@@ -164,7 +164,7 @@ class GPT(nn.Module):
         Forward pass for the language model.
 
         Args:
-            input (Tensor): Input tensor of token indices.
+            input (Tensor): Input tensor of indices.
             targets (Tensor, optional): Target tokens for calculating loss. Defaults to None.
 
         Returns:
@@ -177,7 +177,7 @@ class GPT(nn.Module):
         pos_emb = self.pos_embedding(torch.arange(T, device=device) % self.context_length) # integers from 0 to context_length-1, each is embedded to get context_length x embed_dim tensor
         # positional embeddings get broadcasted across batches
         x = tok_emb + pos_emb # (batch_size,context_length,embed_size) dimensional tensors
-        x = self.transformerBlocks(x)
+        x = self.TransformerBlock(x)
         x = self.LN(x)
         output = torch.matmul(x,self.token_embedding.weight.T) # <- (batch_size,context_length,vocab_size) or (B,T,vocab_size)
 
@@ -192,7 +192,7 @@ class GPT(nn.Module):
             loss = F.cross_entropy(output,targets)
 
         return loss,output
-
+    @torch.no_grad()
     def generate(self,input,max_new_tokens):
         i = 0
         while i < max_new_tokens:

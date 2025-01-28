@@ -1,1 +1,1 @@
-from .utility import load_pretrained_weights,bpeDecode,bpeEncode
+from .utility import load_pretrained_weights,bpeDecode,bpeEncode,load_tokens
