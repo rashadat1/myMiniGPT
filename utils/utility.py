@@ -27,3 +27,33 @@ def load_tokens(filename):
     arr = np.load(filename)
     arr_tensor = torch.tensor(arr, dtype=torch.long)
     return arr_tensor
+
+def generate_streaming_batch(split,train_data,batch_size,context_length,process_rank,num_processes,max_batches_per_epoch=None):
+    """
+    Generates a batch of input-output pairs from the streamed data
+    Args:
+        split: train or val split
+        batch_size: Number of sequences per batch
+        context_length: Number of tokens per sequence
+    Returns:
+        Tuple[Tensor, Tensor]: A batch of input (x) and target (y) sequences
+    """
+    if split == 'train':
+        dataset = train_data.shard(num_shards=num_processes, index = process_rank)
+    
+    batch = []
+    current_batch_count = 0
+    
+    for example in dataset:
+        # each process picks its data portion
+        text = example['text']
+        tokens = bpeEncode(text)
+        batch.extend(tokens)
+        if len(batch) >= batch_size * context_length + 1:
+            x = torch.tensor(batch[:batch_size * context_length], dtype=torch.long).view(batch_size, context_length)
+            y = torch.tensor(batch[1:batch_size * context_length + 1], dtype=torch.long).view(batch_size, context_length)
+            # advance the position in the tensor 
+            yield x, y
+            # discard the used tokens and move forward
+            batch = batch[batch_size * context_length + 1:]
+        current_batch_count += 1

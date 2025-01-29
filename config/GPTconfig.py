@@ -5,7 +5,7 @@ config = {
     'context_length' : 1024, # length of input sequences
     'total_batch_size' : 524288, # 2 ** 19 is close to 0.5M in number of tokens
     'learning_rate' : 1e-6,
-    'max_iters' : 7000,
+    'max_iters' : 19073,
     'eval_interval' : 500,
     'eval_iters' : 200,
     'vocab_size' : 50257, # 50257 with BPE but it turns out the next power of two (50304) is likely more efficient

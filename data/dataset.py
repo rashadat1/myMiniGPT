@@ -1,17 +1,20 @@
 import os
+import sys
 import multiprocessing as mp
 import numpy as np
 import tiktoken
 from datasets import load_dataset
 from tqdm import tqdm
+
+sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__),'..')))
 from config.datasetconfig import config as dataset_config
 cores_to_use = os.cpu_count() // 2
 
 # here we download the dataset, tokenize all of the documents and save them to a shard in the data_cache_dir
-DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__),dataset_config.data_dir,dataset_config.shard_dir)
+DATA_CACHE_DIR = os.path.join(os.path.dirname(__file__),dataset_config['data_dir'],dataset_config['shard_dir'])
 os.makedirs(DATA_CACHE_DIR, exist_ok=True)
 
-fineWeb = load_dataset(dataset_config.dataset_name, name=dataset_config.sample_name, split="train")
+fineWeb = load_dataset(dataset_config['dataset_name'], name=dataset_config['sample_name'], split="train")
 
 # initialize the tokenizer
 enc = tiktoken.get_encoding("gpt2")
@@ -22,13 +25,14 @@ def tokenize(document):
     tokens.extend(enc.encode_ordinary(document["text"]))
     
     tokens_np = np.array(tokens)
-    assert (0 < tokens_np).all() and (tokens_np < 2**16).all(), "token dictionary too large"
+    # enc.decode([0]) yields ! so this must be a <=
+    assert (0 <= tokens_np).all() and (tokens_np < 2**16).all(), "check token dictionary"
     tokens_np_uint16 = tokens_np.astype(np.uint16) # save space with integer encoding
     return tokens_np_uint16
 
 num_processes = max(1, cores_to_use)
 shard_indices = [0]
-shard_size = dataset_config.shard_size
+shard_size = dataset_config['shard_size']
 # creates a pool of processes to process the dataset in parallel
 with mp.Pool(num_processes) as pool:
     shard_index = 0

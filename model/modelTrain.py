@@ -31,7 +31,7 @@ torch.no_grad()
 class DataLoader:
     def __init__(self, batch_size, context_length, num_processes, process_rank, split):
         # get the list of all shards in the shard directory
-        shard_path = os.path.join(dataset_config.data_dir,dataset_config.shard_dir)
+        shard_path = os.path.join(dataset_config['data_dir'],dataset_config['shard_dir'])
         shards = os.listdir(shard_path)
         shards = [s for s in shards if split in s]
         shards = sorted(shards)
@@ -53,9 +53,18 @@ class DataLoader:
         self.current_position = self.batch_size * self.context_length * self.process_rank
     
     def next_batch(self):
-        
+        buffer = self.tokens[self.current_position : self.current_position + self.batch_size * self.context_length + 1]
+        # get the inputs and targets for each batch
+        x = (buffer[:-1]).view(self.batch_size, self.context_length)
+        y = (buffer[1:]).view(self.batch_size, self.context_length)
+        self.current_position += self.batch_size * self.context_length * self.num_processes # move forward in the tokens
+        if self.current_position + (self.batch_size * self.context_length * self.num_processes + 1) > len(self.tokens):
+            self.curr_shard = (self.curr_shard + 1) % len(self.shards)
+            self.tokens = load_tokens(self.shards[self.curr_shard])
+            self.current_position = self.batch_size * self.context_length * self.process_rank
+        return x,y 
 
-
+'''
 def estimate_loss():
     # sum up individual token-level losses for all predictions in the batch
     # store this as total batch loss and then average over multiple batches
@@ -77,7 +86,7 @@ def estimate_loss():
     # puts model back on training mode
     model.train()
     return out
-
+'''
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel as DDP
 import os
@@ -108,42 +117,10 @@ else:
     elif hasattr(torch.backends,'mps') and torch.backends.mps.is_available():
         device = 'mps'
     print(f"using device: {device}")
-
-
-def generate_streaming_batch(split,batch_size,context_length,process_rank,num_processes,max_batches_per_epoch=None):
-    """
-    Generates a batch of input-output pairs from the streamed data
-    Args:
-        split: train or val split
-        batch_size: Number of sequences per batch
-        context_length: Number of tokens per sequence
-    Returns:
-        Tuple[Tensor, Tensor]: A batch of input (x) and target (y) sequences
-    """
-    if split == 'train':
-        dataset = train_data.shard(num_shards=num_processes, index = process_rank)
     
-    batch = []
-    current_batch_count = 0
-    
-    for example in dataset:
-        # each process picks its data portion
-        text = example['text']
-        tokens = bpeEncode(text)
-        batch.extend(tokens)
-        if len(batch) >= batch_size * context_length + 1:
-            x = torch.tensor(batch[:batch_size * context_length], dtype=torch.long).view(batch_size, context_length)
-            y = torch.tensor(batch[1:batch_size * context_length + 1], dtype=torch.long).view(batch_size, context_length)
-            # advance the position in the tensor 
-            yield x, y
-            # discard the used tokens and move forward
-            batch = batch[batch_size * context_length + 1:]
-        current_batch_count += 1
-
-
 model = GPT(vocab_size=config['vocab_size'],embed_size=config['embed_size'],context_length=config['context_length'],num_heads=config['num_heads'],num_layers=config['num_layers'])
 # removes python interpreter and runs a pytorch compiler to optimize tensor operations
-
+train_loader = DataLoader(batch_size=config['batch_size'],context_length=config['context_length'],num_processes=world_size,process_rank=rank,split="train")
 
 if ddp:
     model = model.to(rank)
@@ -167,37 +144,41 @@ print("I am GPU ", rank)
 
 import math
 max_lr = 6e-4
-min_lr = max_lr * 0.01
+min_lr = max_lr * 0.1
 warmup_steps = 715 # warmup schedule that gpt3 used 
 max_steps = config['max_iters']
 
+# cosine decay learning rate scheduler
 def learning_rate_schedule(it):
     if it < warmup_steps:
         return max_lr * (it + 1) / warmup_steps
     if it > max_steps:
         return min_lr
     decay_ratio = (it - warmup_steps) / (max_steps - warmup_steps)
-    assert 0 <= decay_ratio <= 1
-
     coefficient = 0.5 * (1.0 + math.cos(math.pi * decay_ratio))
     return min_lr + coefficient * (max_lr - min_lr)
 
+
+
+
+# training loop
 import time
 training_dict = {'step':[],'loss':[],'lr':[],'dt':[],'tokens_processed':[]}
 for step in range(config['max_iters']):
     t0 = time.time()
+    model.train()
     optimizer.zero_grad()
     loss_accum = 0.0
     num_tokens_processed = 0
     for micro_step in range(accumulation_steps):
-        xb, yb = next(generate_streaming_batch('train',config['batch_size'],config['context_length'],process_rank=rank,num_processes=world_size))
+        xb, yb = train_loader.next_batch()
         xb, yb = xb.to(device), yb.to(device)
         B,T = xb.size()
 
         num_tokens_processed += B * T
         with torch.autocast(device_type='cuda',dtype=torch.bfloat16):
             loss,output = model(xb,yb)
-        loss = loss / accumulation_steps
+        loss = loss / accumulation_steps # scale the loss to account for our grad accumulation
         loss_accum += loss.detach()
         if ddp:
             model.require_backward_grad_sync = (micro_step == accumulation_steps - 1)
@@ -210,6 +191,7 @@ for step in range(config['max_iters']):
     for param_group in optimizer.param_groups:
         param_group['lr'] = lr
     optimizer.step()
+    torch.cuda.synchronize() # wait for GPU to finish working
     t1 = time.time()
     dt = t1 - t0 # time difference in seconds
     training_dict['step'].append(step)
